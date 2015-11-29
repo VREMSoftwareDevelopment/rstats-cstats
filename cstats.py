@@ -70,7 +70,7 @@ class CStats(object):
     def dump_record(self):
         current = self.index
 
-        print("========== IP Address: {0} ==========".format(self.get_value(16)[0:12]))
+        print("========== IP Address: {0} ==========".format(self.get_value(16)))
         version = self.unpack_value("Q", 8)
         print("Version {0}".format(version))
         if version == CStats.ID_V0:
