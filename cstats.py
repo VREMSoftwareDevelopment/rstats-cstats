@@ -117,7 +117,7 @@ class CStats(object):
             print("{0:02d}:{1:02d},{2},{3}".format(time / CStats.MINUTES, time % CStats.MINUTES, rx, tx))
 
     def dump_stats(self, size):
-        print("Date (yyyy/mm/dd),Down (bytes)Up (bytes)")
+        print("Date (yyyy/mm/dd),Down (bytes),Up (bytes)")
         for i in range(size):
             time = self.unpack_value("Q", 8)
             down = self.unpack_value("Q", 8)
@@ -125,12 +125,7 @@ class CStats(object):
             print("{0},{1},{2}".format(self.get_date(time).strftime("%Y/%m/%d"), down, up))
 
     def unpack_value(self, unpack_type, size):
-        current = self.index
-        self.index += size
-        if self.index > self.size:
-            sys.stderr.write("Reached end of the buffer. Calculated:{0} Maximum:{1}".format(self.index, self.size))
-            exit(3)
-        value, = struct.unpack(unpack_type, self.fileContent[current:self.index])
+        value, = struct.unpack(unpack_type, self.get_value(size))
         return value
 
     def get_value(self, size):
