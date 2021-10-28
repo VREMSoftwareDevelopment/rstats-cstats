@@ -37,7 +37,7 @@ class CStats(object):
     PER_MINUTE = 2
     HOURS = 24
     MINUTES = 60
-    MAX_SPEED = HOURS * MINUTES / PER_MINUTE
+    MAX_SPEED = round(HOURS * MINUTES / PER_MINUTE)
 
     def __init__(self, filename):
         try:
@@ -46,7 +46,7 @@ class CStats(object):
                 self.fileContent = fileHandle.read()
             self.index = 0
             self.size = len(self.fileContent)
-            self.records = self.size / CStats.RECORD_SIZE
+            self.records = self.size // CStats.RECORD_SIZE
             print("File size: {0}".format(self.size))
             print("Number of records: {0}".format(self.records))
         except IOError:
@@ -114,7 +114,7 @@ class CStats(object):
             rx = self.unpack_value("Q", 8)
             tx = self.unpack_value("Q", 8)
             time = i * CStats.PER_MINUTE
-            print("{0:02d}:{1:02d},{2},{3}".format(time / CStats.MINUTES, time % CStats.MINUTES, rx, tx))
+            print("{0:02d}:{1:02d},{2},{3}".format(round(time / CStats.MINUTES), time % CStats.MINUTES, rx, tx))
 
     def dump_stats(self, size):
         print("Date (yyyy/mm/dd),Down (bytes),Up (bytes)")
