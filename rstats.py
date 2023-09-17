@@ -348,8 +348,9 @@ def main():
             export_object["monthly"] = sorted(
                 list(stats.monthly.values()), key=lambda entry: entry["date"]
             )
+            json_data = json.dumps(export_object, default=default)
             with open(args.out, "w", encoding="utf8") as f:
-                f.write(json.dumps(export_object, default=default))
+                f.write(json_data)
 
             copyfile(args.filename, f"{args.filename}.bak")
 
