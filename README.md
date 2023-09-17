@@ -11,6 +11,12 @@
 ### Usage:
 `python rstats.py <filename> [--out <output-filename>]`
 
-### Example:
+### Examples:
+
+#### Print to console:
+
 `python rstats.py tomato_rstats.gz`
+
+#### Log to file:
+
 `python rstats.py tomato_rstats.gz --out traffic.json`
