@@ -31,32 +31,82 @@ import sys
 import traceback
 from datetime import datetime, timedelta
 from datetime import date as dt_date
+from datetime import time as dt_time
 from os.path import isfile
 from shutil import copyfile
 
 
+# Pre-calculate for performance
 TERABYTE = math.pow(1024, 4)
 DATE_FORMAT = "%Y-%m-%d"
-CURRENT_DATE = dt_date.today()
-CURRENT_TIME = datetime.now()
-IS_MIDNIGHT = CURRENT_TIME.hour == 0
+TIME_FORMAT = "%H:%M"
+NOW = datetime.now()
+YESTERDAY = NOW.date() - timedelta(days=1)
+ONE_HOUR_AGO_TIME = (NOW - timedelta(hours=1)).time()
 
 
 def default(obj):
     if isinstance(obj, dt_date):
-        obj = obj.strftime(DATE_FORMAT)
-        return obj
-    return obj
+        return obj.strftime(DATE_FORMAT)
+    if isinstance(obj, dt_time):
+        return obj.strftime(TIME_FORMAT)
+    if isinstance(obj, Comment):
+        return {
+            "message": obj.message,
+            "cutoff_down": obj.cutoff_down,
+            "cutoff_up": obj.cutoff_up,
+        }
+    raise TypeError(f"Unable to serialize {obj} of type {type(obj)}")
+
+
+class Comment:
+    def __init__(
+        self,
+        cutoff_down: str | None = None,
+        cutoff_up: str | None = None,
+        message: str | None = None,
+    ):
+        super().__init__()
+        if message is None:
+            self.message = "Data error. Values are lower than actual."
+        else:
+            self.message = message
+        self.cutoff_down = cutoff_down
+        self.cutoff_up = cutoff_up
+
+    @property
+    def cutoff_down(self) -> str | None:
+        return self._cutoff_down
+
+    @cutoff_down.setter
+    def cutoff_down(self, new_cutoff: dt_date | str | None):
+        if isinstance(new_cutoff, dt_date):
+            self._cutoff_down = new_cutoff.strftime(TIME_FORMAT)
+        else:
+            self._cutoff_down = new_cutoff
+
+    @property
+    def cutoff_up(self) -> str | None:
+        return self._cutoff_up
+
+    @cutoff_up.setter
+    def cutoff_up(self, new_cutoff: dt_date | str | None):
+        if isinstance(new_cutoff, dt_date):
+            self._cutoff_up = new_cutoff.strftime(TIME_FORMAT)
+        else:
+            self._cutoff_up = new_cutoff
 
 
 class Props:  # pylint: disable=too-few-public-methods
-    def __init__(self, date: dt_date | str, down: int, up: int, comment=None):
+    def __init__(
+        self, date: dt_date | str, down: int, up: int, comment: dict | None = None
+    ):
         if isinstance(date, str):
             date = datetime.strptime(date, DATE_FORMAT).date()
         self.date = date
         self.down = down
         self.up = up
-        self.comment = comment
+        self.comment = None if comment is None else Comment(**comment)
 
 
 class DataPoint(dict):
@@ -75,15 +125,16 @@ class DataPoint(dict):
     def __init__(self, props: Props, daily=False):
         super().__init__()
         self["date"] = props.date
-        self["down"] = props.down
-        self["up"] = props.up
+        self["down"] = -1 if props.down > TERABYTE else props.down
+        self["up"] = -1 if props.up > TERABYTE else props.up
+        # Include comments only if necessary
         if props.comment is not None:
-            if isinstance(props.comment, str):
-                self["comment"] = {}
-                self["comment"]["msg"] = props.comment
-            elif isinstance(props.comment, dict):
-                self["comment"] = props.comment.copy()
-        self._check_edge_case(daily)
+            self["comment"] = props.comment
+        # Set error comments if data is invalid
+        if self["down"] == -1:
+            self.note_error(daily, True)
+        if self["up"] == -1:
+            self.note_error(daily, False)
 
     @staticmethod
     def format_bytes(size: int, scale: str = None) -> str:
@@ -116,30 +167,29 @@ class DataPoint(dict):
     @property
     def data_error_up(self) -> bool:
         return self["up"] > TERABYTE
-    def _check_edge_case(self, daily=False):
-        """Handle edge case when error happens before
-        previous data is available to trigger a check"""
-        if IS_MIDNIGHT and self["date"] == CURRENT_DATE:
-            if self.data_error_down and daily:
-                self["down"] = 0
-                self.set_error(True, True)
-            if self.data_error_up and daily:
-                self["up"] = 0
-                self.set_error(True, False)
 
-    def set_error(self, is_daily, is_down, msg=None):
-        if msg is None:
-            msg = "Data error. Values are lower than actual."
-        cutoff_str = "cutoff_down" if is_down else "cutoff_up"
+    def note_error(
+        self,
+        is_daily: bool = False,
+        is_down: bool = False,
+        msg: str | None = None,
+    ):
+        """Make note of error and set last known good data time, if applicable"""
         if "comment" not in self:
-            self["comment"] = {}
-        self["comment"]["msg"] = msg
-        if is_daily and cutoff_str not in self["comment"]:
-            if self["date"] == CURRENT_DATE and IS_MIDNIGHT:
-                rollback_time = "00:00"
-            else:
-                rollback_time = (CURRENT_TIME - timedelta(hours=1)).strftime("%H:%M")
-            self["comment"][cutoff_str] = rollback_time
+            self["comment"] = Comment(message=msg)
+
+        if is_daily:
+            if self["date"] >= YESTERDAY:
+                # Error happened yesterday or today
+                if is_down:
+                    self["comment"].cutoff_down = ONE_HOUR_AGO_TIME
+                else:
+                    self["comment"].cutoff_up = ONE_HOUR_AGO_TIME
+            # Else: Somehow even older data got corrupted,
+            # but it can be fully restored and all values will be overwritten
+        else:
+            # Monthly comments don't use timestamps
+            self["comment"].message = msg
 
     def __str__(self) -> str:
         return (
@@ -156,7 +206,7 @@ class StatsData:
         self.monthly: dict = {}
 
     def add_daily(self, entry):
-        new_data = DataPoint(Props(*entry))
+        new_data = DataPoint(Props(*entry), daily=True)
         self.daily[new_data.date_string] = new_data
 
     def add_monthly(self, entry):
@@ -164,46 +214,51 @@ class StatsData:
         self.monthly[new_data.date_string] = new_data
 
     def merge_history(self, previous_data):
+        # Previous data uses default types
         if "daily" in previous_data:
             for previous in previous_data["daily"]:
-                if previous["date"] is None:
+                prev_date = previous["date"]
+                if prev_date is None:
                     continue
                 # Use old data to fill in history and roll back errors
-                prev_dp = DataPoint(Props(**previous))
-                if prev_dp.date_string in self.daily:
-                    self._update_handler(self.daily[prev_dp.date_string], prev_dp, True)
+                if prev_date in self.daily:
+                    self._update_handler(self.daily[prev_date], previous)
                 else:
-                    self.daily[prev_dp.date_string] = prev_dp
+                    self.daily[prev_date] = DataPoint(Props(**previous), True)
 
         if "monthly" in previous_data:
             for previous in previous_data["monthly"]:
-                if previous["date"] is None:
+                prev_date = previous["date"]
+                if prev_date is None:
                     continue
                 # Use old data to fill in history and roll back errors
-                prev_dp = DataPoint(Props(**previous))
-                if prev_dp.date_string in self.monthly:
-                    self._update_handler(self.monthly[prev_dp.date_string], prev_dp)
+                if prev_date in self.monthly:
+                    self._update_handler(self.monthly[prev_date], previous)
                 else:
-                    self.monthly[prev_dp.date_string] = prev_dp
+                    self.monthly[prev_date] = DataPoint(Props(**previous))
 
-    def _update_handler(self, curr: DataPoint, prev: DataPoint, is_daily=False):
-        """Try updating if different or revert if error"""
+    def _update_handler(self, curr: DataPoint, prev: dict):
+        # Previous data uses default types
         if "comment" in prev:
-            curr["comment"] = prev["comment"].copy()
+            if "comment" not in curr:
+                curr["comment"] = Comment(**prev["comment"])
+            else:
+                # Use merge in old data, if available
+                curr["comment"].message = prev["comment"]["message"]
+                if (
+                    "cutoff_down" in prev["comment"]
+                    and prev["comment"]["cutoff_down"] is not None
+                ):
+                    curr["comment"].cutoff_down = prev["comment"]["cutoff_down"]
+                if (
+                    "cutoff_up" in prev["comment"]
+                    and prev["comment"]["cutoff_up"] is not None
+                ):
+                    curr["comment"].cutoff_up = prev["comment"]["cutoff_up"]
 
-        if curr["down"] != prev["down"] or curr["up"] != prev["up"]:
-            # Current data is different from imported history
-            if curr.data_error_down:
-                curr["down"] = prev["down"]
-                curr.set_error(is_daily, True)
-            elif prev.data_error_down:
-                curr["down"] = max(curr["down"], prev["down"])
-
-            if curr.data_error_up:
-                curr["up"] = prev["up"]
-                curr.set_error(is_daily, False)
-            elif prev.data_error_up:
-                curr["up"] = max(curr["up"], prev["up"])
+        # Set to highest value (invalid data would already be set to -1)
+        curr["down"] = max(curr["down"], prev["down"])
+        curr["up"] = max(curr["up"], prev["up"])
 
 
 # rstats supports version ID_V1
