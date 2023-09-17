@@ -29,7 +29,7 @@ import math
 import struct
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import date as dt_date
 from os.path import isfile
 from shutil import copyfile
@@ -37,6 +37,7 @@ from shutil import copyfile
 
 TERABYTE = math.pow(1024, 4)
 DATE_FORMAT = "%Y-%m-%d"
+CURRENT_DATE = dt_date.today()
 CURRENT_TIME = datetime.now()
 IS_MIDNIGHT = CURRENT_TIME.hour == 0
 
@@ -82,8 +83,7 @@ class DataPoint(dict):
                 self["comment"]["msg"] = props.comment
             elif isinstance(props.comment, dict):
                 self["comment"] = props.comment.copy()
-        if IS_MIDNIGHT:
-            self._check_edge_case(daily)
+        self._check_edge_case(daily)
 
     @staticmethod
     def format_bytes(size: int, scale: str = None) -> str:
@@ -109,14 +109,23 @@ class DataPoint(dict):
     def total_bytes(self) -> int:
         return self["down"] + self["up"]
 
+    @property
+    def data_error_down(self) -> bool:
+        return self["down"] > TERABYTE
+
+    @property
+    def data_error_up(self) -> bool:
+        return self["up"] > TERABYTE
     def _check_edge_case(self, daily=False):
-        """Handle edge case when error happens before previous data is available"""
-        if self["down"] > TERABYTE and daily:
-            self["down"] = 0
-            self.set_error(True, True)
-        if self["up"] > TERABYTE and daily:
-            self["up"] = 0
-            self.set_error(True, False)
+        """Handle edge case when error happens before
+        previous data is available to trigger a check"""
+        if IS_MIDNIGHT and self["date"] == CURRENT_DATE:
+            if self.data_error_down and daily:
+                self["down"] = 0
+                self.set_error(True, True)
+            if self.data_error_up and daily:
+                self["up"] = 0
+                self.set_error(True, False)
 
     def set_error(self, is_daily, is_down, msg=None):
         if msg is None:
@@ -126,9 +135,11 @@ class DataPoint(dict):
             self["comment"] = {}
         self["comment"]["msg"] = msg
         if is_daily and cutoff_str not in self["comment"]:
-            self["comment"][cutoff_str] = CURRENT_TIME.replace(
-                hour=0 if IS_MIDNIGHT else CURRENT_TIME.hour - 1
-            ).strftime("%H:%M")
+            if self["date"] == CURRENT_DATE and IS_MIDNIGHT:
+                rollback_time = "00:00"
+            else:
+                rollback_time = (CURRENT_TIME - timedelta(hours=1)).strftime("%H:%M")
+            self["comment"][cutoff_str] = rollback_time
 
     def __str__(self) -> str:
         return (
@@ -159,8 +170,8 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 prev_dp = DataPoint(Props(**previous))
-                if previous["date"] in self.daily:
                     self._update_handler(prev_dp, self.daily[prev_dp.date_string], True)
+                if prev_dp.date_string in self.daily:
                 else:
                     self.daily[prev_dp.date_string] = prev_dp
 
@@ -170,8 +181,8 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 prev_dp = DataPoint(Props(**previous))
-                if previous["date"] in self.monthly:
                     self._update_handler(prev_dp, self.monthly[prev_dp.date_string])
+                if prev_dp.date_string in self.monthly:
                 else:
                     self.monthly[prev_dp.date_string] = prev_dp
 
@@ -181,16 +192,17 @@ class StatsData:
             curr["comment"] = prev["comment"].copy()
 
         if prev["down"] != curr["down"] or prev["up"] != curr["up"]:
-            if curr["down"] > TERABYTE:
+            # Current data is different from imported history
+            if curr.data_error_down:
                 curr["down"] = prev["down"]
                 curr.set_error(is_daily, True)
-            elif prev["down"] < TERABYTE:
+            elif prev.data_error_down:
                 curr["down"] = max(curr["down"], prev["down"])
 
-            if curr["up"] > TERABYTE:
+            if curr.data_error_up:
                 curr["up"] = prev["up"]
                 curr.set_error(is_daily, False)
-            elif prev["up"] < TERABYTE:
+            elif prev.data_error_up:
                 curr["up"] = max(curr["up"], prev["up"])
 
 
