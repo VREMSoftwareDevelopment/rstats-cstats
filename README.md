@@ -1,21 +1,16 @@
+[![Python Versions](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue)](https://github.com/awsr/rstats-logger)
+
+
 ## rstats
 
-- Reads rstats file backup bandwidth usage file created by Tomato USB (router firmware).
-- Displays human readable format to console
+- Reads rstats file backup bandwidth usage file created by Tomato USB (router firmware), Asuswrt-Merlin, and others.
+- Displays human readable format to console.
+- Logs traffic stats to a JSON file.
+- Attempts to gracefully handle instances of a bug with ASUS RT-AC68U where values will get corrupted and show up as being in the exabyte range.
 
 ### Usage:
-`python rstats.py <filename>`
+`python rstats.py <filename> [--out <output-filename>]`
 
 ### Example:
 `python rstats.py tomato_rstats.gz`
-
-## cstats
-
-- Reads cstats file backup bandwidth usage file created by Tomato USB (router firmware).
-- Displays human readable format to console
-
-### Usage:
-`python cstats.py <filename>`
-
-### Example:
-`python cstats.py tomato_cstats.gz`
+`python rstats.py tomato_rstats.gz --out traffic.json`

@@ -1,2 +1,5 @@
 /.idea
 *.gz
+/venv
+/.venv
+/test

@@ -4,6 +4,7 @@
 #
 #
 #    Copyright (C) 2010 - 2015 VREM Software Development <VREMSoftwareDevelopment@gmail.com>
+#    Copyright (C) 2023 Alex Wiser <https://github.com/awsr>
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
 #    you may not use this file except in compliance with the License.
@@ -18,15 +19,183 @@
 #    limitations under the License.
 #
 
-from datetime import date
-import traceback
+# IMPORTANT: Currently designed to run as a CRON job on the router every hour.
+#            Script makes several assumptions based on this expectation.
+
+import argparse
 import gzip
+import json
+import math
 import struct
 import sys
+import traceback
+from datetime import datetime
+from datetime import date as dt_date
+from os.path import isfile
+from shutil import copyfile
+
+
+TERABYTE = math.pow(1024, 4)
+DATE_FORMAT = "%Y-%m-%d"
+CURRENT_TIME = datetime.now()
+IS_MIDNIGHT = CURRENT_TIME.hour == 0
+
+
+def default(obj):
+    if isinstance(obj, dt_date):
+        obj = obj.strftime(DATE_FORMAT)
+        return obj
+    return obj
+
+
+class Props:  # pylint: disable=too-few-public-methods
+    def __init__(self, date: dt_date | str, down: int, up: int, comment=None):
+        if isinstance(date, str):
+            date = datetime.strptime(date, DATE_FORMAT).date()
+        self.date = date
+        self.down = down
+        self.up = up
+        self.comment = comment
+
+
+class DataPoint(dict):
+    # fmt: off
+    _data_scale = {
+        'kb': 1, 'kib': 1,
+        'mb': 2, 'mib': 2,
+        'gb': 3, 'gib': 3,
+        'tb': 4, 'tib': 4,
+        'pb': 5, 'pib': 5,
+        'eb': 6, 'eib': 6
+    }
+    _data_scale_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB')
+    # fmt: on
+
+    def __init__(self, props: Props, daily=False):
+        super().__init__()
+        self["date"] = props.date
+        self["down"] = props.down
+        self["up"] = props.up
+        if props.comment is not None:
+            if isinstance(props.comment, str):
+                self["comment"] = {}
+                self["comment"]["msg"] = props.comment
+            elif isinstance(props.comment, dict):
+                self["comment"] = props.comment.copy()
+        if IS_MIDNIGHT:
+            self._check_edge_case(daily)
+
+    @staticmethod
+    def format_bytes(size: int, scale: str = None) -> str:
+        if size < 1024:
+            return f"{size} B"
+
+        scale = scale.lower()
+
+        if scale is None or scale not in DataPoint._data_scale:
+            exponent = int(math.floor(math.log(size, 1024)))
+        else:
+            exponent = DataPoint._data_scale[scale]
+
+        divisor = math.pow(1024, exponent)
+        value = round(size / divisor, 2)
+        return f"{value} {DataPoint._data_scale_names[exponent]}"
+
+    @property
+    def date_string(self) -> str:
+        return self["date"].strftime(DATE_FORMAT)
+
+    @property
+    def total_bytes(self) -> int:
+        return self["down"] + self["up"]
+
+    def _check_edge_case(self, daily=False):
+        """Handle edge case when error happens before previous data is available"""
+        if self["down"] > TERABYTE and daily:
+            self["down"] = 0
+            self.set_error(True, True)
+        if self["up"] > TERABYTE and daily:
+            self["up"] = 0
+            self.set_error(True, False)
+
+    def set_error(self, is_daily, is_down, msg=None):
+        if msg is None:
+            msg = "Data error. Values are lower than actual."
+        cutoff_str = "cutoff_down" if is_down else "cutoff_up"
+        if "comment" not in self:
+            self["comment"] = {}
+        self["comment"]["msg"] = msg
+        if is_daily and cutoff_str not in self["comment"]:
+            self["comment"][cutoff_str] = CURRENT_TIME.replace(
+                hour=0 if IS_MIDNIGHT else CURRENT_TIME.hour - 1
+            ).strftime("%H:%M")
+
+    def __str__(self) -> str:
+        return (
+            f"{self['date'].strftime(DATE_FORMAT)}: "
+            + f"{DataPoint.format_bytes(self['down'])}, "
+            + f"{DataPoint.format_bytes(self['up'])}"
+        )
+
+
+class StatsData:
+    def __init__(self) -> None:
+        super().__init__()
+        self.daily: dict = {}
+        self.monthly: dict = {}
+
+    def add_daily(self, entry):
+        new_data = DataPoint(Props(*entry))
+        self.daily[new_data.date_string] = new_data
+
+    def add_monthly(self, entry):
+        new_data = DataPoint(Props(*entry))
+        self.monthly[new_data.date_string] = new_data
+
+    def merge_history(self, previous_data):
+        if "daily" in previous_data:
+            for previous in previous_data["daily"]:
+                if previous["date"] is None:
+                    continue
+                # Use old data to fill in history and roll back errors
+                prev_dp = DataPoint(Props(**previous))
+                if previous["date"] in self.daily:
+                    self._update_handler(prev_dp, self.daily[prev_dp.date_string], True)
+                else:
+                    self.daily[prev_dp.date_string] = prev_dp
+
+        if "monthly" in previous_data:
+            for previous in previous_data["monthly"]:
+                if previous["date"] is None:
+                    continue
+                # Use old data to fill in history and roll back errors
+                prev_dp = DataPoint(Props(**previous))
+                if previous["date"] in self.monthly:
+                    self._update_handler(prev_dp, self.monthly[prev_dp.date_string])
+                else:
+                    self.monthly[prev_dp.date_string] = prev_dp
+
+    def _update_handler(self, prev: DataPoint, curr: DataPoint, is_daily=False):
+        """Try updating if different or revert if error"""
+        if "comment" in prev:
+            curr["comment"] = prev["comment"].copy()
+
+        if prev["down"] != curr["down"] or prev["up"] != curr["up"]:
+            if curr["down"] > TERABYTE:
+                curr["down"] = prev["down"]
+                curr.set_error(is_daily, True)
+            elif prev["down"] < TERABYTE:
+                curr["down"] = max(curr["down"], prev["down"])
+
+            if curr["up"] > TERABYTE:
+                curr["up"] = prev["up"]
+                curr.set_error(is_daily, False)
+            elif prev["up"] < TERABYTE:
+                curr["up"] = max(curr["up"], prev["up"])
 
 
 # rstats supports version ID_V1
-class RStats(object):
+class RStats:
     # expected file size in bytes
     EXPECTED_SIZE = 2112
     # version 0 has 12 entries per month
@@ -37,83 +206,143 @@ class RStats(object):
     MONTH_COUNT = 25
     DAY_COUNT = 62
 
-    def __init__(self, filename):
+    def __init__(self, filename: str):
         try:
             print(">>>>>>>>>> Tomato USB RSTATS <<<<<<<<<<")
-            with gzip.open(filename, 'rb') as fileHandle:
-                self.fileContent = fileHandle.read()
-            if len(self.fileContent) != RStats.EXPECTED_SIZE:
-                print("Unsupported File Format. Require unzip file size: {0}.".format(RStats.EXPECTED_SIZE))
+            if filename.endswith("gz"):
+                with gzip.open(filename, "rb") as file_handle:
+                    self.file_content = file_handle.read()
+            else:
+                with open(filename, "rb") as file_handle:
+                    self.file_content = file_handle.read()
+
+            if len(self.file_content) != RStats.EXPECTED_SIZE:
+                print(
+                    "Unsupported File Format. Require unzip file size: "
+                    + f"{RStats.EXPECTED_SIZE}."
+                )
                 sys.exit(2)
-            print("Supported File Format Version: {0}".format(RStats.ID_V1))
+            print(f"Supported File Format Version: {RStats.ID_V1}")
             self.index = 0
+            self.data = StatsData()
         except IOError:
-            sys.stderr.write("Can NOT read file: "+filename)
+            sys.stderr.write("Can NOT read file: " + filename)
             traceback.print_exc()
 
     def dump(self):
-        version = self.unpack_value("Q", 8)
-        print("Version: {0}".format(version))
-        if version != RStats.ID_V1:
-            sys.stderr.write("Unknown version number: {0}\n".format(version))
-            sys.exit(2)
+        self._version_check()
+
+        for entry_d in self._dump_stats(RStats.DAY_COUNT):
+            self.data.add_daily(entry_d)
+        self._unpack_value("q", 8)
+
+        for entry_m in self._dump_stats(RStats.MONTH_COUNT):
+            self.data.add_monthly(entry_m)
+        self._unpack_value("q", 8)
+
+        self._completion_check()
+        return self.data
+
+    def print(self):
+        self._version_check()
 
         print("---------- Daily ----------")
-        self.dump_stats(RStats.DAY_COUNT)
-        print("dailyp: {0}".format(self.unpack_value("q", 8)))
+        self.print_stats(RStats.DAY_COUNT)
+        print(f"dailyp: {self._unpack_value('q', 8)}")
 
         print("---------- Monthly ----------")
-        self.dump_stats(RStats.MONTH_COUNT)
-        print("monthlyp: {0}".format(self.unpack_value("q", 8)))
+        self.print_stats(RStats.MONTH_COUNT)
+        print(f"monthlyp: {self._unpack_value('q', 8)}")
 
-        # check if all bytes are read
+        self._completion_check()
+
+    def print_stats(self, size):
+        print("Date (yyyy-mm-dd),Down (bytes),Up (bytes)")
+        for stat in self._dump_stats(size):
+            print(f"{stat[0].strftime(DATE_FORMAT)},{stat[1]},{stat[2]}")
+
+    def _dump_stats(self, size):
+        for _ in range(size):
+            time = self._unpack_value("Q", 8)
+            down = self._unpack_value("Q", 8)
+            up = self._unpack_value("Q", 8)
+            date = self.get_date(time)
+            if date.year > 1900:
+                yield (date, down, up)
+
+    def _unpack_value(self, unpack_type, size):
+        current = self.index
+        self.index += size
+        if self.index > RStats.EXPECTED_SIZE:
+            sys.stderr.write(
+                f"Reached end of the buffer. {self.index}/{RStats.EXPECTED_SIZE}"
+            )
+            sys.exit(3)
+        (value,) = struct.unpack(unpack_type, self.file_content[current : self.index])
+        return value
+
+    def _version_check(self):
+        """Check file format version"""
+        version = self._unpack_value("Q", 8)
+        print(f"Version: {version}")
+        if version != RStats.ID_V1:
+            sys.stderr.write(f"Unknown version number: {version}\n")
+            sys.exit(2)
+
+    def _completion_check(self):
+        """Check if all bytes are read"""
         if self.index == self.EXPECTED_SIZE:
             print("All bytes read")
         else:
             print(">>> Warning!")
-            print("Read {0} bytes.".format(self.index))
-            print("Expected to read {0} bytes.".format(RStats.EXPECTED_SIZE))
-            print("Left to read {0} bytes".format(RStats.EXPECTED_SIZE - self.index))
-
-    def dump_stats(self, size):
-        print("Date (yyyy/mm/dd),Down (bytes),Up (bytes)")
-        for i in range(size):
-            time = self.unpack_value("Q", 8)
-            down = self.unpack_value("Q", 8)
-            up = self.unpack_value("Q", 8)
-            print("{0},{1},{2}".format(self.get_date(time).strftime("%Y/%m/%d"), down, up))
-
-    def unpack_value(self, unpack_type, size):
-        current = self.index
-        self.index += size
-        if self.index > RStats.EXPECTED_SIZE:
-            sys.stderr.write("Reached end of the buffer. {0}/{1}".format(self.index, RStats.EXPECTED_SIZE))
-            exit(3)
-        value, = struct.unpack(unpack_type, self.fileContent[current:self.index])
-        return value
+            print(f"Read {self.index} bytes.")
+            print(f"Expected to read {RStats.EXPECTED_SIZE} bytes.")
+            print(f"Left to read {RStats.EXPECTED_SIZE - self.index} bytes")
 
     @staticmethod
     def get_date(time):
         year = ((time >> 16) & 0xFF) + 1900
         month = ((time >> 8) & 0xFF) + 1
         day = time & 0xFF
-        return date(year, month, 1 if day == 0 else day)
+        return dt_date(year, month, 1 if day == 0 else day)
 
 
 def main():
-    import optparse
-    from os.path import isfile
+    parser = argparse.ArgumentParser()
+    parser.add_argument("filename")
+    parser.add_argument("-o", "--out")
 
-    usage = "usage: %prog <filename>"
-    parser = optparse.OptionParser(usage)
+    args = parser.parse_args()
 
-    options, args = parser.parse_args()
+    if isfile(args.filename):
+        if args.out is None:
+            RStats(args.filename).print()
+        else:
+            stats = RStats(args.filename).dump()
+            if isfile(args.out):
+                copyfile(args.out, f"{args.out}.bak")
+                try:
+                    with open(args.out, "r", encoding="utf8") as f:
+                        prev_export = json.loads(f.read())
+                    stats.merge_history(prev_export)
+                except json.JSONDecodeError as err:
+                    sys.stderr.write("JSON Decode Error: " + err.msg)
+                    copyfile(args.out, f"{args.out}.err")
 
-    if len(args) == 1 and isfile(args[0]):
-        RStats(args[0]).dump()
+            export_object = {}
+            export_object["daily"] = sorted(
+                list(stats.daily.values()), key=lambda entry: entry["date"]
+            )
+            export_object["monthly"] = sorted(
+                list(stats.monthly.values()), key=lambda entry: entry["date"]
+            )
+            with open(args.out, "w", encoding="utf8") as f:
+                f.write(json.dumps(export_object, default=default))
+
+            copyfile(args.filename, f"{args.filename}.bak")
+
     else:
-        print(usage)
-        sys.exit(1)
+        parser.exit(1, f"{args.filename} not found")
 
 
 if __name__ == "__main__":
