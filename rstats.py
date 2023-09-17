@@ -170,8 +170,8 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 prev_dp = DataPoint(Props(**previous))
-                    self._update_handler(prev_dp, self.daily[prev_dp.date_string], True)
                 if prev_dp.date_string in self.daily:
+                    self._update_handler(self.daily[prev_dp.date_string], prev_dp, True)
                 else:
                     self.daily[prev_dp.date_string] = prev_dp
 
@@ -181,17 +181,17 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 prev_dp = DataPoint(Props(**previous))
-                    self._update_handler(prev_dp, self.monthly[prev_dp.date_string])
                 if prev_dp.date_string in self.monthly:
+                    self._update_handler(self.monthly[prev_dp.date_string], prev_dp)
                 else:
                     self.monthly[prev_dp.date_string] = prev_dp
 
-    def _update_handler(self, prev: DataPoint, curr: DataPoint, is_daily=False):
+    def _update_handler(self, curr: DataPoint, prev: DataPoint, is_daily=False):
         """Try updating if different or revert if error"""
         if "comment" in prev:
             curr["comment"] = prev["comment"].copy()
 
-        if prev["down"] != curr["down"] or prev["up"] != curr["up"]:
+        if curr["down"] != prev["down"] or curr["up"] != prev["up"]:
             # Current data is different from imported history
             if curr.data_error_down:
                 curr["down"] = prev["down"]
