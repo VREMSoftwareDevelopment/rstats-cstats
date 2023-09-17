@@ -8,7 +8,7 @@
             "name": "Python: rstats logger",
             "type": "python",
             "request": "launch",
-            "program": "${file}",
+            "program": "rstats.py",
             "args": [
                 "./test/tomato_rstats.gz",
                 "--out",
