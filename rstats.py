@@ -30,10 +30,11 @@ import struct
 import sys
 import traceback
 from datetime import datetime, timedelta
-from datetime import date as dt_date
-from datetime import time as dt_time
 from os.path import isfile, getmtime
 from shutil import copyfile
+
+
+SCRIPT_INTERVAL = timedelta(hours=1)
 
 
 # Pre-calculate for performance
@@ -41,30 +42,15 @@ PETABYTE = math.pow(1024, 5)
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M"
 NOW = datetime.now()
-YESTERDAY = NOW.date() - timedelta(days=1)
-ONE_HOUR_AGO_TIME = (NOW - timedelta(hours=1)).time()
+LAST_SCRIPT_RUN = NOW - SCRIPT_INTERVAL
 
 
-def default(obj):
-    if isinstance(obj, dt_date):
-        return obj.strftime(DATE_FORMAT)
-    if isinstance(obj, dt_time):
-        return obj.strftime(TIME_FORMAT)
-    if isinstance(obj, Comment):
-        return {
-            "message": obj.message,
-            "cutoff_down": obj.cutoff_down,
-            "cutoff_up": obj.cutoff_up,
-        }
-    raise TypeError(f"Unable to serialize {obj} of type {type(obj)}")
-
-
-class Comment:
+class Comment:  # pylint: disable=too-few-public-methods
     def __init__(
         self,
-        cutoff_down: str | None = None,
-        cutoff_up: str | None = None,
         message: str | None = None,
+        cutoff_down: datetime | str | None = None,
+        cutoff_up: datetime | str | None = None,
     ):
         super().__init__()
         if message is None:
@@ -74,42 +60,46 @@ class Comment:
         self.cutoff_down = cutoff_down
         self.cutoff_up = cutoff_up
 
-    @property
-    def cutoff_down(self) -> str | None:
-        return self._cutoff_down
-
-    @cutoff_down.setter
-    def cutoff_down(self, new_cutoff: dt_date | str | None):
-        if isinstance(new_cutoff, dt_date):
-            self._cutoff_down = new_cutoff.strftime(TIME_FORMAT)
+    def export(self) -> dict[str, str | None]:
+        if self.cutoff_down is None:
+            export_down = None
         else:
-            self._cutoff_down = new_cutoff
-
-    @property
-    def cutoff_up(self) -> str | None:
-        return self._cutoff_up
-
-    @cutoff_up.setter
-    def cutoff_up(self, new_cutoff: dt_date | str | None):
-        if isinstance(new_cutoff, dt_date):
-            self._cutoff_up = new_cutoff.strftime(TIME_FORMAT)
+            export_down = (
+                self.cutoff_down
+                if isinstance(self.cutoff_down, str)
+                else self.cutoff_down.strftime(TIME_FORMAT)
+            )
+        if self.cutoff_up is None:
+            export_up = None
         else:
-            self._cutoff_up = new_cutoff
+            export_up = (
+                self.cutoff_up
+                if isinstance(self.cutoff_up, str)
+                else self.cutoff_up.strftime(TIME_FORMAT)
+            )
+
+        return {
+            "message": self.message,
+            "cutoff_down": export_down,
+            "cutoff_up": export_up,
+        }
 
 
 class Props:  # pylint: disable=too-few-public-methods
     def __init__(
-        self, date: dt_date | str, down: int, up: int, comment: dict | None = None
+        self, date: datetime | str, down: int, up: int, comment: dict | None = None
     ):
         if isinstance(date, str):
-            date = datetime.strptime(date, DATE_FORMAT).date()
-        self.date = date
+            self.date = datetime.strptime(date, DATE_FORMAT)
+        else:
+            self.date = date
         self.down = down
         self.up = up
-        self.comment = None if comment is None else Comment(**comment)
+        # Comments only exist for previous data
+        self.comment = comment
 
 
-class DataPoint(dict):
+class DataPoint:
     # fmt: off
     _data_scale = {
         'kb': 1, 'kib': 1,
@@ -122,19 +112,27 @@ class DataPoint(dict):
     _data_scale_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB')
     # fmt: on
 
-    def __init__(self, props: Props, daily=False):
+    def __init__(self, props: Props, rollback_time: datetime, daily=False):
         super().__init__()
-        self["date"] = props.date
-        self["down"] = -1 if props.down > PETABYTE else props.down
-        self["up"] = -1 if props.up > PETABYTE else props.up
-        # Include comments only if necessary
-        if props.comment is not None:
-            self["comment"] = props.comment
-        # Set error comments if data is invalid
-        if self["down"] == -1:
-            self.note_error(daily, True)
-        if self["up"] == -1:
-            self.note_error(daily, False)
+        self.rollback_time = rollback_time
+        self.date = props.date
+        self.down = -1 if props.down > PETABYTE else props.down
+        self.up = -1 if props.up > PETABYTE else props.up
+        self.comment = None
+        if self.down == -1:
+            self._warn_bad_data(daily, True)
+        if self.up == -1:
+            self._warn_bad_data(daily, False)
+
+    def export(self):
+        export_dict = {
+            "date": self.date.strftime(DATE_FORMAT),
+            "down": self.down,
+            "up": self.up,
+        }
+        if self.comment is not None:
+            export_dict["comment"] = self.comment
+        return export_dict
 
     @staticmethod
     def format_bytes(size: int, scale: str = None) -> str:
@@ -154,59 +152,87 @@ class DataPoint(dict):
 
     @property
     def date_string(self) -> str:
-        return self["date"].strftime(DATE_FORMAT)
+        return self.date.strftime(DATE_FORMAT)
 
     @property
     def total_bytes(self) -> int:
-        return self["down"] + self["up"]
+        return self.down + self.up
 
-    def note_error(
+    def _warn_bad_data(
         self,
         is_daily: bool = False,
         is_down: bool = False,
         msg: str | None = None,
     ):
-        """Make note of error and set last known good data time, if applicable"""
-        if "comment" not in self:
-            self["comment"] = Comment(message=msg)
+        """Make note of error and set last known good data time, if applicable.
+        Only called when working on current data."""
+        if self.comment is None:
+            self.comment = Comment(message=msg)
 
         if is_daily:
-            if self["date"] >= YESTERDAY:
-                # Error happened yesterday or today
-                if is_down:
-                    self["comment"].cutoff_down = ONE_HOUR_AGO_TIME
-                else:
-                    self["comment"].cutoff_up = ONE_HOUR_AGO_TIME
-            # Else: Somehow even older data got corrupted,
-            # but it can be fully restored and all values will be overwritten
+            if is_down:
+                self.comment.cutoff_down = self.rollback_time
+            else:
+                self.comment.cutoff_up = self.rollback_time
         else:
             # Monthly comments don't use timestamps
-            self["comment"].message = msg
+            self.comment.message = msg
 
     def __str__(self) -> str:
         return (
-            f"{self['date'].strftime(DATE_FORMAT)}: "
-            + f"{DataPoint.format_bytes(self['down'])}, "
-            + f"{DataPoint.format_bytes(self['up'])}"
+            f"{self.date.strftime(DATE_FORMAT)}: "
+            + f"{DataPoint.format_bytes(self.down)}, "
+            + f"{DataPoint.format_bytes(self.up)}"
         )
 
 
 class StatsData:
-    def __init__(self) -> None:
+    def __init__(self, modified: datetime) -> None:
         super().__init__()
         self.daily: dict = {}
         self.monthly: dict = {}
+        self.modified_time = modified
+        self.rollback_time = self.modified_time - SCRIPT_INTERVAL  # Estimate
 
-    def add_daily(self, entry):
-        new_data = DataPoint(Props(*entry), daily=True)
+    def export(self) -> dict:
+        return {
+            "meta": {
+                "time_data": self.modified_time.isoformat(),
+                "time_script": NOW.isoformat(),
+            },
+            "daily": sorted(list(self.daily.values()), key=lambda entry: entry.date),
+            "monthly": sorted(
+                list(self.monthly.values()), key=lambda entry: entry.date
+            ),
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.export(), default=self._default_func)
+
+    def _default_func(self, obj):
+        try:
+            return obj.export()
+        except:
+            raise TypeError(  # pylint: disable=raise-missing-from
+                f"Unable to serialize {obj} of type {type(obj)}"
+            )
+
+    def add_daily(self, entry: tuple[datetime, int, int]):
+        new_data = DataPoint(Props(*entry), self.rollback_time, daily=True)
         self.daily[new_data.date_string] = new_data
 
-    def add_monthly(self, entry):
-        new_data = DataPoint(Props(*entry))
+    def add_monthly(self, entry: tuple[datetime, int, int]):
+        new_data = DataPoint(Props(*entry), self.rollback_time)
         self.monthly[new_data.date_string] = new_data
 
     def merge_history(self, previous_data):
-        # Previous data uses default types
+        # Previous data uses normal dict
+        if "meta" in previous_data:
+            # Update estimate with actual value
+            self.rollback_time = datetime.fromisoformat(
+                previous_data["meta"]["time_data"]
+            )
+
         if "daily" in previous_data:
             for previous in previous_data["daily"]:
                 prev_date = previous["date"]
@@ -214,9 +240,11 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 if prev_date in self.daily:
-                    self._update_handler(self.daily[prev_date], previous)
+                    self._merge_history_logic(self.daily[prev_date], previous)
                 else:
-                    self.daily[prev_date] = DataPoint(Props(**previous), True)
+                    self.daily[prev_date] = DataPoint(
+                        Props(**previous), self.rollback_time, True
+                    )
 
         if "monthly" in previous_data:
             for previous in previous_data["monthly"]:
@@ -225,32 +253,27 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 if prev_date in self.monthly:
-                    self._update_handler(self.monthly[prev_date], previous)
+                    self._merge_history_logic(self.monthly[prev_date], previous)
                 else:
-                    self.monthly[prev_date] = DataPoint(Props(**previous))
+                    self.monthly[prev_date] = DataPoint(
+                        Props(**previous), self.rollback_time
+                    )
 
-    def _update_handler(self, curr: DataPoint, prev: dict):
-        # Previous data uses default types
-        if "comment" in prev:
-            if "comment" not in curr:
-                curr["comment"] = Comment(**prev["comment"])
-            else:
-                # Use merge in old data, if available
-                curr["comment"].message = prev["comment"]["message"]
-                if (
-                    "cutoff_down" in prev["comment"]
-                    and prev["comment"]["cutoff_down"] is not None
-                ):
-                    curr["comment"].cutoff_down = prev["comment"]["cutoff_down"]
-                if (
-                    "cutoff_up" in prev["comment"]
-                    and prev["comment"]["cutoff_up"] is not None
-                ):
-                    curr["comment"].cutoff_up = prev["comment"]["cutoff_up"]
-
+    def _merge_history_logic(self, curr: DataPoint, prev: dict):
         # Set to highest value (invalid data would already be set to -1)
-        curr["down"] = max(curr["down"], prev["down"])
-        curr["up"] = max(curr["up"], prev["up"])
+        curr.down = max(curr.down, prev["down"])
+        curr.up = max(curr.up, prev["up"])
+
+        if "comment" in prev:
+            prev_comment = prev["comment"]
+            if curr.comment is None:
+                curr.comment = prev_comment
+            else:
+                curr.comment.message = prev_comment["message"]
+                if prev_comment["cutoff_down"] is not None:
+                    curr.comment.cutoff_down = prev_comment["cutoff_down"]
+                if prev_comment["cutoff_up"] is not None:
+                    curr.comment.cutoff_up = prev_comment["cutoff_up"]
 
 
 # rstats supports version ID_V1
@@ -265,7 +288,7 @@ class RStats:
     MONTH_COUNT = 25
     DAY_COUNT = 62
 
-    def __init__(self, filename: str):
+    def __init__(self, filename: str, modified: datetime):
         try:
             print(">>>>>>>>>> Tomato USB RSTATS <<<<<<<<<<")
             if filename.endswith("gz"):
@@ -283,7 +306,8 @@ class RStats:
                 sys.exit(2)
             print(f"Supported File Format Version: {RStats.ID_V1}")
             self.index = 0
-            self.data = StatsData()
+            self.modified = modified
+            self.data = StatsData(self.modified)
         except IOError:
             sys.stderr.write("Can NOT read file: " + filename)
             traceback.print_exc()
@@ -315,12 +339,12 @@ class RStats:
 
         self._completion_check()
 
-    def print_stats(self, size):
+    def print_stats(self, size: int):
         print("Date (yyyy-mm-dd),Down (bytes),Up (bytes)")
         for stat in self._dump_stats(size):
             print(f"{stat[0].strftime(DATE_FORMAT)},{stat[1]},{stat[2]}")
 
-    def _dump_stats(self, size):
+    def _dump_stats(self, size: int):
         for _ in range(size):
             time = self._unpack_value("Q", 8)
             down = self._unpack_value("Q", 8)
@@ -329,7 +353,7 @@ class RStats:
             if date.year > 1900:
                 yield (date, down, up)
 
-    def _unpack_value(self, unpack_type, size):
+    def _unpack_value(self, unpack_type: str, size: int):
         current = self.index
         self.index += size
         if self.index > RStats.EXPECTED_SIZE:
@@ -363,7 +387,7 @@ class RStats:
         year = ((time >> 16) & 0xFF) + 1900
         month = ((time >> 8) & 0xFF) + 1
         day = time & 0xFF
-        return dt_date(year, month, 1 if day == 0 else day)
+        return datetime(year, month, 1 if day == 0 else day)
 
 
 def main():
@@ -376,9 +400,9 @@ def main():
     if isfile(args.filename):
         modified = datetime.fromtimestamp(getmtime(args.filename))
         if args.out is None:
-            RStats(args.filename).print()
+            RStats(args.filename, modified).print()
         else:
-            stats = RStats(args.filename).dump()
+            stats = RStats(args.filename, modified).dump()
             if isfile(args.out):
                 copyfile(args.out, f"{args.out}.bak")
                 try:
@@ -389,18 +413,7 @@ def main():
                     sys.stderr.write("JSON Decode Error: " + err.msg)
                     copyfile(args.out, f"{args.out}.err")
 
-            export_object = {}
-            export_object["meta"] = {
-                "time_data": modified.isoformat(),
-                "time_script": NOW.isoformat(),
-            }
-            export_object["daily"] = sorted(
-                list(stats.daily.values()), key=lambda entry: entry["date"]
-            )
-            export_object["monthly"] = sorted(
-                list(stats.monthly.values()), key=lambda entry: entry["date"]
-            )
-            json_data = json.dumps(export_object, default=default)
+            json_data = stats.to_json()
             with open(args.out, "w", encoding="utf8") as f:
                 f.write(json_data)
 
