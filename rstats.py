@@ -37,7 +37,7 @@ from shutil import copyfile
 SCRIPT_INTERVAL = timedelta(hours=1)
 
 
-# Pre-calculate for performance
+# Constants
 PETABYTE = math.pow(1024, 5)
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M"
