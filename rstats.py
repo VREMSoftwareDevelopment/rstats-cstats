@@ -118,7 +118,7 @@ class DataPoint:
         self.date = props.date
         self.down = -1 if props.down > PETABYTE else props.down
         self.up = -1 if props.up > PETABYTE else props.up
-        self.comment = None
+        self.comment = props.comment
         if self.down == -1:
             self._warn_bad_data(daily, True)
         if self.up == -1:
