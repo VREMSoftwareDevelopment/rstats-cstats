@@ -37,7 +37,7 @@ from shutil import copyfile
 
 
 # Pre-calculate for performance
-TERABYTE = math.pow(1024, 4)
+PETABYTE = math.pow(1024, 5)
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M"
 NOW = datetime.now()
@@ -125,8 +125,8 @@ class DataPoint(dict):
     def __init__(self, props: Props, daily=False):
         super().__init__()
         self["date"] = props.date
-        self["down"] = -1 if props.down > TERABYTE else props.down
-        self["up"] = -1 if props.up > TERABYTE else props.up
+        self["down"] = -1 if props.down > PETABYTE else props.down
+        self["up"] = -1 if props.up > PETABYTE else props.up
         # Include comments only if necessary
         if props.comment is not None:
             self["comment"] = props.comment
@@ -159,14 +159,6 @@ class DataPoint(dict):
     @property
     def total_bytes(self) -> int:
         return self["down"] + self["up"]
-
-    @property
-    def data_error_down(self) -> bool:
-        return self["down"] > TERABYTE
-
-    @property
-    def data_error_up(self) -> bool:
-        return self["up"] > TERABYTE
 
     def note_error(
         self,
