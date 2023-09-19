@@ -32,7 +32,7 @@ import traceback
 from datetime import datetime, timedelta
 from datetime import date as dt_date
 from datetime import time as dt_time
-from os.path import isfile
+from os.path import isfile, getmtime
 from shutil import copyfile
 
 
@@ -374,6 +374,7 @@ def main():
     args = parser.parse_args()
 
     if isfile(args.filename):
+        modified = datetime.fromtimestamp(getmtime(args.filename))
         if args.out is None:
             RStats(args.filename).print()
         else:
@@ -389,6 +390,10 @@ def main():
                     copyfile(args.out, f"{args.out}.err")
 
             export_object = {}
+            export_object["meta"] = {
+                "time_data": modified.isoformat(),
+                "time_script": NOW.isoformat(),
+            }
             export_object["daily"] = sorted(
                 list(stats.daily.values()), key=lambda entry: entry["date"]
             )
