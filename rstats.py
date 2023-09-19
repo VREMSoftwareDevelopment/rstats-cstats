@@ -42,7 +42,6 @@ PETABYTE = math.pow(1024, 5)
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M"
 NOW = datetime.now()
-LAST_SCRIPT_RUN = NOW - SCRIPT_INTERVAL
 
 
 class Comment:  # pylint: disable=too-few-public-methods
