@@ -52,7 +52,6 @@ class Comment:  # pylint: disable=too-few-public-methods
         cutoff_down: datetime | str | None = None,
         cutoff_up: datetime | str | None = None,
     ):
-        super().__init__()
         if message is None:
             self.message = "Data error. Values are lower than actual."
         else:
@@ -113,7 +112,6 @@ class DataPoint:
     # fmt: on
 
     def __init__(self, props: Props, rollback_time: datetime, daily=False):
-        super().__init__()
         self.rollback_time = rollback_time
         self.date = props.date
         self.down = -1 if props.down > PETABYTE else props.down
@@ -188,7 +186,6 @@ class DataPoint:
 
 class StatsData:
     def __init__(self, modified: datetime) -> None:
-        super().__init__()
         self.daily: dict = {}
         self.monthly: dict = {}
         self.modified_time = modified
