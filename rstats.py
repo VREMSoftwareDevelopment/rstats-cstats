@@ -400,7 +400,6 @@ def main():
         else:
             stats = RStats(args.filename, modified).dump()
             if isfile(args.out):
-                copyfile(args.out, f"{args.out}.bak")
                 try:
                     with open(args.out, "r", encoding="utf8") as f:
                         prev_export = json.loads(f.read())
@@ -413,7 +412,15 @@ def main():
             with open(args.out, "w", encoding="utf8") as f:
                 f.write(json_data)
 
-            copyfile(args.filename, f"{args.filename}.bak")
+            # Run backup once per day or if one doesn't exist yet
+            do_backup = True
+            backup_name = f"{args.filename}.bak"
+            if isfile(backup_name):
+                last_backup = datetime.fromtimestamp(getmtime(backup_name))
+                do_backup = last_backup.date() != NOW.date()
+            if do_backup:
+                copyfile(args.out, f"{args.out}.bak")
+                copyfile(args.filename, backup_name)
 
     else:
         parser.exit(1, f"{args.filename} not found")
