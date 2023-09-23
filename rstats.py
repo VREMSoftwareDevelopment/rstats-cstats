@@ -167,6 +167,9 @@ class DataPoint:
             self.comment = Comment(message=msg)
 
         if is_daily:
+            if self.date > self.rollback_time:
+                # If it's a new day with no prior data, limit to current date
+                self.rollback_time = self.date
             if is_down:
                 self.comment.cutoff_down = self.rollback_time
             else:
@@ -387,6 +390,7 @@ class RStats:
         month = ((time >> 8) & 0xFF) + 1
         day = time & 0xFF
         return datetime(year, month, 1 if day == 0 else day)
+        # datetime will have hours and minutes set to 0
 
 
 def main():
