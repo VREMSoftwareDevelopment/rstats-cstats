@@ -256,7 +256,7 @@ class StatsData:
                     )
 
     def _merge_history_logic(self, curr: DataPoint, prev: dict):
-        # Set to highest value (invalid data would already be set to -1)
+        # Set to highest value (invalid data should already be set to -1)
         curr.down = max(curr.down, prev["down"])
         curr.up = max(curr.up, prev["up"])
 
@@ -268,8 +268,11 @@ class StatsData:
                 curr.comment.message = prev_comment["message"]
                 if prev_comment["cutoff_down"] is not None:
                     curr.comment.cutoff_down = prev_comment["cutoff_down"]
+                    # Freeze to last known uncorrupted(?) data
+                    curr.down = prev["down"]
                 if prev_comment["cutoff_up"] is not None:
                     curr.comment.cutoff_up = prev_comment["cutoff_up"]
+                    curr.up = prev["up"]
 
 
 # rstats supports version ID_V1
