@@ -264,17 +264,17 @@ class StatsData:
         curr.up = max(curr.up, prev["up"])
 
         if "comment" in prev:
-            prev_comment = prev["comment"]
+            prev_cmt = prev["comment"]
             if curr.comment is None:
-                curr.comment = prev_comment
+                curr.comment = prev["comment"]
             else:
-                curr.comment.message = prev_comment["message"]
-                if prev_comment["cutoff_down"] is not None:
-                    curr.comment.cutoff_down = prev_comment["cutoff_down"]
+                curr.comment.message = prev_cmt["message"]
+                if "cutoff_down" in prev_cmt and prev_cmt["cutoff_down"] is not None:
+                    curr.comment.cutoff_down = prev_cmt["cutoff_down"]
                     # Freeze to last known uncorrupted(?) data
                     curr.down = prev["down"]
-                if prev_comment["cutoff_up"] is not None:
-                    curr.comment.cutoff_up = prev_comment["cutoff_up"]
+                if "cutoff_up" in prev_cmt and prev_cmt["cutoff_up"] is not None:
+                    curr.comment.cutoff_up = prev_cmt["cutoff_up"]
                     curr.up = prev["up"]
 
 
