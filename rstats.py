@@ -137,7 +137,7 @@ class DataPoint:
 
     def __init__(self, props: Props, rollback_time: datetime, daily=False):
         self.rollback_time = rollback_time
-        self.date = props.date
+        self.date = props.date  # WARNING: Naive datetime mainly for date and 00:00
         self.down = -1 if props.down > PETABYTE else props.down
         self.up = -1 if props.up > PETABYTE else props.up
         self.comment = props.comment
@@ -284,7 +284,7 @@ class StatsData:
                     )
 
     def _merge_history_logic(self, curr: DataPoint, prev: dict):
-        # Set to highest value (invalid data should already be set to -1)
+        # Set to highest value
         curr.down = max(curr.down, prev["down"])
         curr.up = max(curr.up, prev["up"])
 
