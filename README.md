@@ -1,5 +1,8 @@
 [![Python Versions](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue)](https://github.com/awsr/rstats-logger)
 
+# Warning
+
+It appears that the time reported through Python is UTC instead of the time zone the router was configured for. Currently working on either a reliable way to get the actual time, or will remove the cutoff timestamps.
 
 ## rstats
 
