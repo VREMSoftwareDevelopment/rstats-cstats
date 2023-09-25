@@ -27,10 +27,11 @@ import gzip
 import json
 import math
 import struct
+import subprocess
 import sys
 import traceback
 from datetime import datetime, timedelta
-from os.path import isfile, getmtime
+from os.path import isfile
 from shutil import copyfile
 
 
@@ -41,7 +42,28 @@ SCRIPT_INTERVAL = timedelta(hours=1)
 PETABYTE = math.pow(1024, 5)
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M"
-NOW = datetime.now()
+
+
+def get_time(file: str | None = None):
+    try:
+        if file is not None:
+            local_time = subprocess.run(
+                ["date", "-Iseconds", "-r", file], check=True, capture_output=True
+            )
+        else:
+            local_time = subprocess.run(
+                ["date", "-Iseconds"], check=True, capture_output=True
+            )
+        return datetime.fromisoformat(local_time.stdout.decode("utf8").split("\n")[0])
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return datetime.now()
+
+
+NOW = get_time()
+if NOW.tzinfo is not None and NOW.tzinfo.utcoffset(NOW) is not None:
+    DATETIME_NAIVE = False
+else:
+    DATETIME_NAIVE = True
 
 
 class Comment:  # pylint: disable=too-few-public-methods
@@ -59,6 +81,9 @@ class Comment:  # pylint: disable=too-few-public-methods
         self.cutoff_up = cutoff_up
 
     def export(self) -> dict[str, str | None]:
+        if DATETIME_NAIVE:
+            return {"message": self.message}
+
         if self.cutoff_down is None:
             export_down = None
         else:
@@ -166,8 +191,8 @@ class DataPoint:
         if self.comment is None:
             self.comment = Comment(message=msg)
 
-        if is_daily:
-            if self.date > self.rollback_time:
+        if is_daily and not DATETIME_NAIVE:
+            if self.date.date() > self.rollback_time.date():
                 # If it's a new day with no prior data, limit to current date
                 self.rollback_time = self.date
             if is_down:
@@ -401,7 +426,7 @@ def main():
     args = parser.parse_args()
 
     if isfile(args.filename):
-        modified = datetime.fromtimestamp(getmtime(args.filename))
+        modified = get_time(file=args.filename)
         if args.out is None:
             RStats(args.filename, modified).print()
         else:
@@ -423,7 +448,7 @@ def main():
             do_backup = True
             backup_name = f"{args.filename}.bak"
             if isfile(backup_name):
-                last_backup = datetime.fromtimestamp(getmtime(backup_name))
+                last_backup = get_time(file=backup_name)
                 do_backup = last_backup.date() != NOW.date()
             if do_backup:
                 copyfile(args.out, f"{args.out}.bak")

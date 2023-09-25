@@ -1,10 +1,6 @@
 [![Python Versions](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue)](https://github.com/awsr/rstats-logger)
 
-# Warning
-
-It appears that the time reported through Python is UTC instead of the time zone the router was configured for. Currently working on either a reliable way to get the actual time, or will remove the cutoff timestamps.
-
-## rstats
+# rstats
 
 - Reads rstats file backup bandwidth usage file created by Tomato USB (router firmware), Asuswrt-Merlin, and others.
 - Displays human readable format to console.
@@ -23,3 +19,9 @@ It appears that the time reported through Python is UTC instead of the time zone
 #### Log to file:
 
 `python rstats.py tomato_rstats.gz --out traffic.json`
+
+---
+
+### Warning
+
+Python seems to be told the system time is in UTC instead of what the router is set to... except in some circumstances. For reliability, the system's `date` command is used to get time values. If this fails, cutoff timestamps for data errors will not be available.
