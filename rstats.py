@@ -72,6 +72,7 @@ class Comment:  # pylint: disable=too-few-public-methods
         message: str | None = None,
         cutoff_down: datetime | str | None = None,
         cutoff_up: datetime | str | None = None,
+        daily: bool = False,
     ):
         if message is None:
             self.message = "Data error. Values are lower than actual."
@@ -79,9 +80,10 @@ class Comment:  # pylint: disable=too-few-public-methods
             self.message = message
         self.cutoff_down = cutoff_down
         self.cutoff_up = cutoff_up
+        self.is_daily = daily
 
     def export(self) -> dict[str, str | None]:
-        if DATETIME_NAIVE:
+        if DATETIME_NAIVE or self.is_daily is False:
             return {"message": self.message}
 
         if self.cutoff_down is None:
@@ -189,7 +191,7 @@ class DataPoint:
         """Make note of error and set last known good data time, if applicable.
         Only called when working on current data."""
         if self.comment is None:
-            self.comment = Comment(message=msg)
+            self.comment = Comment(message=msg, daily=is_daily)
 
         if is_daily and not DATETIME_NAIVE:
             if self.date.date() > self.rollback_time.date():
@@ -264,7 +266,7 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 if prev_date in self.daily:
-                    self._merge_history_logic(self.daily[prev_date], previous)
+                    self._merge_history_logic(self.daily[prev_date], previous, True)
                 else:
                     self.daily[prev_date] = DataPoint(
                         Props(**previous), self.rollback_time, True
@@ -277,13 +279,13 @@ class StatsData:
                     continue
                 # Use old data to fill in history and roll back errors
                 if prev_date in self.monthly:
-                    self._merge_history_logic(self.monthly[prev_date], previous)
+                    self._merge_history_logic(self.monthly[prev_date], previous, False)
                 else:
                     self.monthly[prev_date] = DataPoint(
                         Props(**previous), self.rollback_time
                     )
 
-    def _merge_history_logic(self, curr: DataPoint, prev: dict):
+    def _merge_history_logic(self, curr: DataPoint, prev: dict, is_daily: bool = False):
         # Set to highest value
         curr.down = max(curr.down, prev["down"])
         curr.up = max(curr.up, prev["up"])
@@ -291,7 +293,7 @@ class StatsData:
         if "comment" in prev:
             prev_cmt = prev["comment"]
             if curr.comment is None:
-                curr.comment = Comment()
+                curr.comment = Comment(daily=is_daily)
 
             curr.comment.message = prev_cmt["message"]
             if "cutoff_down" in prev_cmt and prev_cmt["cutoff_down"] is not None:
