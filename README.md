@@ -24,4 +24,4 @@
 
 ### Warning
 
-Python seems to be told the system time is in UTC instead of what the router is set to... except in some circumstances. For reliability, the system's `date` command is used to get time values. If this fails, cutoff timestamps for data errors will not be available.
+Python seems to be told the system time is in UTC instead of what the router is set to... except in some circumstances. For reliability, the system's `date` command is used to get time values.

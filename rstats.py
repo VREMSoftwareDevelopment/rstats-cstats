@@ -19,8 +19,7 @@
 #    limitations under the License.
 #
 
-# IMPORTANT: Currently designed to run as a CRON job on the router every hour.
-#            Script makes several assumptions based on this expectation.
+# IMPORTANT: Currently designed to run as a CRON job on the router.
 
 import argparse
 import gzip
@@ -30,15 +29,20 @@ import struct
 import subprocess
 import sys
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from os.path import isfile
 from shutil import copyfile
 
+try:
+    from util.interop import data_interop
+except ImportError:
 
-SCRIPT_INTERVAL = timedelta(hours=1)
+    def data_interop(data: dict, *args):  # pylint: disable=unused-argument
+        return data
 
 
 # Constants
+LOG_FORMAT_VER = 2
 PETABYTE = math.pow(1024, 5)
 DATE_FORMAT = "%Y-%m-%d"
 TIME_FORMAT = "%H:%M"
@@ -70,43 +74,25 @@ class Comment:  # pylint: disable=too-few-public-methods
     def __init__(
         self,
         message: str | None = None,
-        cutoff_down: datetime | str | None = None,
-        cutoff_up: datetime | str | None = None,
+        error_down: bool = False,
+        error_up: bool = False,
         daily: bool = False,
     ):
         if message is None:
             self.message = "Data error. Values are lower than actual."
         else:
             self.message = message
-        self.cutoff_down = cutoff_down
-        self.cutoff_up = cutoff_up
+        self.error_down = error_down
+        self.error_up = error_up
         self.is_daily = daily
 
-    def export(self) -> dict[str, str | None]:
-        if DATETIME_NAIVE or self.is_daily is False:
+    def export(self) -> dict[str, str | bool]:
+        if self.is_daily is False:
             return {"message": self.message}
-
-        if self.cutoff_down is None:
-            export_down = None
-        else:
-            export_down = (
-                self.cutoff_down
-                if isinstance(self.cutoff_down, str)
-                else self.cutoff_down.strftime(TIME_FORMAT)
-            )
-        if self.cutoff_up is None:
-            export_up = None
-        else:
-            export_up = (
-                self.cutoff_up
-                if isinstance(self.cutoff_up, str)
-                else self.cutoff_up.strftime(TIME_FORMAT)
-            )
-
         return {
             "message": self.message,
-            "cutoff_down": export_down,
-            "cutoff_up": export_up,
+            "error_down": self.error_down,
+            "error_up": self.error_up,
         }
 
 
@@ -137,9 +123,8 @@ class DataPoint:
     _data_scale_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB')
     # fmt: on
 
-    def __init__(self, props: Props, rollback_time: datetime, daily=False):
-        self.rollback_time = rollback_time
-        self.date = props.date  # WARNING: Naive datetime mainly for date and 00:00
+    def __init__(self, props: Props, daily=False):
+        self.date = props.date
         self.down = -1 if props.down > PETABYTE else props.down
         self.up = -1 if props.up > PETABYTE else props.up
         self.comment = props.comment
@@ -188,22 +173,17 @@ class DataPoint:
         is_down: bool = False,
         msg: str | None = None,
     ):
-        """Make note of error and set last known good data time, if applicable.
-        Only called when working on current data."""
+        """Make note of error. Only called when working on current data."""
         if self.comment is None:
             self.comment = Comment(message=msg, daily=is_daily)
-
-        if is_daily and not DATETIME_NAIVE:
-            if self.date.date() > self.rollback_time.date():
-                # If it's a new day with no prior data, limit to current date
-                self.rollback_time = self.date
-            if is_down:
-                self.comment.cutoff_down = self.rollback_time
-            else:
-                self.comment.cutoff_up = self.rollback_time
         else:
-            # Monthly comments don't use timestamps
             self.comment.message = msg
+
+        if is_daily:
+            if is_down:
+                self.comment.error_down = True
+            else:
+                self.comment.error_up = True
 
     def __str__(self) -> str:
         return (
@@ -218,11 +198,11 @@ class StatsData:
         self.daily: dict = {}
         self.monthly: dict = {}
         self.modified_time = modified
-        self.rollback_time = self.modified_time - SCRIPT_INTERVAL  # Estimate
 
     def export(self) -> dict:
         return {
             "meta": {
+                "format": LOG_FORMAT_VER,
                 "time_data": self.modified_time.isoformat(),
                 "time_script": NOW.isoformat(),
             },
@@ -238,27 +218,21 @@ class StatsData:
     def _default_func(self, obj):
         try:
             return obj.export()
-        except:
+        except Exception:
             raise TypeError(  # pylint: disable=raise-missing-from
                 f"Unable to serialize {obj} of type {type(obj)}"
             )
 
     def add_daily(self, entry: tuple[datetime, int, int]):
-        new_data = DataPoint(Props(*entry), self.rollback_time, daily=True)
+        new_data = DataPoint(Props(*entry), daily=True)
         self.daily[new_data.date_string] = new_data
 
     def add_monthly(self, entry: tuple[datetime, int, int]):
-        new_data = DataPoint(Props(*entry), self.rollback_time)
+        new_data = DataPoint(Props(*entry))
         self.monthly[new_data.date_string] = new_data
 
     def merge_history(self, previous_data):
         # Previous data uses normal dict
-        if "meta" in previous_data:
-            # Update estimate with actual value
-            self.rollback_time = datetime.fromisoformat(
-                previous_data["meta"]["time_data"]
-            )
-
         if "daily" in previous_data:
             for previous in previous_data["daily"]:
                 prev_date = previous["date"]
@@ -268,9 +242,7 @@ class StatsData:
                 if prev_date in self.daily:
                     self._merge_history_logic(self.daily[prev_date], previous, True)
                 else:
-                    self.daily[prev_date] = DataPoint(
-                        Props(**previous), self.rollback_time, True
-                    )
+                    self.daily[prev_date] = DataPoint(Props(**previous), True)
 
         if "monthly" in previous_data:
             for previous in previous_data["monthly"]:
@@ -281,9 +253,7 @@ class StatsData:
                 if prev_date in self.monthly:
                     self._merge_history_logic(self.monthly[prev_date], previous, False)
                 else:
-                    self.monthly[prev_date] = DataPoint(
-                        Props(**previous), self.rollback_time
-                    )
+                    self.monthly[prev_date] = DataPoint(Props(**previous))
 
     def _merge_history_logic(self, curr: DataPoint, prev: dict, is_daily: bool = False):
         # Set to highest value
@@ -296,12 +266,12 @@ class StatsData:
                 curr.comment = Comment(daily=is_daily)
 
             curr.comment.message = prev_cmt["message"]
-            if "cutoff_down" in prev_cmt and prev_cmt["cutoff_down"] is not None:
-                curr.comment.cutoff_down = prev_cmt["cutoff_down"]
+            if "error_down" in prev_cmt and prev_cmt["error_down"] is not None:
+                curr.comment.error_down = prev_cmt["error_down"]
                 # Freeze to last known uncorrupted(?) data
                 curr.down = prev["down"]
-            if "cutoff_up" in prev_cmt and prev_cmt["cutoff_up"] is not None:
-                curr.comment.cutoff_up = prev_cmt["cutoff_up"]
+            if "error_up" in prev_cmt and prev_cmt["error_up"] is not None:
+                curr.comment.error_up = prev_cmt["error_up"]
                 curr.up = prev["up"]
 
 
@@ -436,7 +406,7 @@ def main():
             if isfile(args.out):
                 try:
                     with open(args.out, "r", encoding="utf8") as f:
-                        prev_export = json.loads(f.read())
+                        prev_export = data_interop(json.loads(f.read()), LOG_FORMAT_VER)
                     stats.merge_history(prev_export)
                 except json.JSONDecodeError as err:
                     sys.stderr.write("JSON Decode Error: " + err.msg)
