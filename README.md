@@ -1,4 +1,4 @@
-[![Python Versions](https://img.shields.io/badge/python-3.10%20%7C%203.11-blue)](https://github.com/awsr/rstats-logger)
+[![Python Versions](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://github.com/awsr/rstats-logger)
 
 # rstats
 
