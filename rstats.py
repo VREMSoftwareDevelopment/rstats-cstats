@@ -159,11 +159,12 @@ class DataPoint:
         return export_dict
 
     @staticmethod
-    def format_bytes(size: int, scale: str = None) -> str:
+    def format_bytes(size: int, scale: str | None = None) -> str:
         if size < 1024:
             return f"{size} B"
 
-        scale = scale.lower()
+        if scale is not None:
+            scale = scale.lower()
 
         if scale is None or scale not in DataPoint._data_scale:
             exponent = int(math.floor(math.log(size, 1024)))
