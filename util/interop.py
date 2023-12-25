@@ -63,7 +63,7 @@ if __name__ == "__main__":
         prog="RStats-Logger Interop",
         description="Convert older JSON logs to newer format",
     )
-    parser.add_argument("path", required=True)
+    parser.add_argument("path")
     args = parser.parse_args()
 
     with open(args.path, "r", encoding="utf8") as f:
