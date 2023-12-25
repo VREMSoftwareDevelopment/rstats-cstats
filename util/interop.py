@@ -68,6 +68,8 @@ if __name__ == "__main__":
 
     with open(args.path, "r", encoding="utf8") as f:
         file_data = json.loads(f.read())
+    with open(args.path + ".bak", "w", encoding="utf8") as f:
+        f.write(json.dumps(file_data))
     data_interop(file_data, CURRENT_VERSION)
     with open(args.path, "w", encoding="utf8") as f:
         f.write(json.dumps(file_data))
