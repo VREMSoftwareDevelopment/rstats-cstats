@@ -2,7 +2,7 @@
 
 # rstats
 
-- Reads rstats file backup bandwidth usage file created by Tomato USB (router firmware), Asuswrt-Merlin, and others.
+- Reads the rstats bandwidth usage file created by Tomato USB (router firmware), Asuswrt-Merlin, and others.
 - Displays human readable format to console.
 - Logs traffic stats to a JSON file.
 - Attempts to gracefully handle instances of a bug with ASUS RT-AC68U where values will get corrupted and show up as being in the exabyte range.
