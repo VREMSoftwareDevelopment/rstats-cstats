@@ -19,8 +19,8 @@
 #    limitations under the License.
 #
 
-# IMPORTANT: Currently designed to run as a CRON job on the router.
 
+from abc import abstractmethod
 import argparse
 import gzip
 import json
@@ -33,19 +33,11 @@ from datetime import datetime
 from os.path import isfile
 from shutil import copyfile
 
-try:
-    from util.interop import data_interop
-except ImportError:
-
-    def data_interop(data: dict, *args):  # pylint: disable=unused-argument
-        return data
-
 
 # Constants
 LOG_FORMAT_VER = 2
 PETABYTE = math.pow(1024, 5)
 DATE_FORMAT = "%Y-%m-%d"
-TIME_FORMAT = "%H:%M"
 
 
 def get_time(file: str | None = None):
@@ -64,140 +56,135 @@ def get_time(file: str | None = None):
 
 
 NOW = get_time()
-if NOW.tzinfo is not None and NOW.tzinfo.utcoffset(NOW) is not None:
-    DATETIME_NAIVE = False
-else:
-    DATETIME_NAIVE = True
 
 
-class Comment:  # pylint: disable=too-few-public-methods
+# fmt: off
+_data_scale = {
+    'kb': 1, 'kib': 1,
+    'mb': 2, 'mib': 2,
+    'gb': 3, 'gib': 3,
+    'tb': 4, 'tib': 4,
+    'pb': 5, 'pib': 5,
+    'eb': 6, 'eib': 6
+}
+# Technically kebibyte, mebibyte, gibibyte, etc...
+_data_scale_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB')
+# fmt: on
+
+
+def format_bytes(size: int, scale: str | None = None) -> str:
+    if size < 1024:
+        return f"{size} B"
+
+    if scale is not None:
+        scale = scale.lower()
+
+    if scale is None or scale not in _data_scale:
+        exponent = int(math.floor(math.log(size, 1024)))
+    else:
+        exponent = _data_scale[scale]
+
+    divisor = math.pow(1024, exponent)
+    value = round(size / divisor, 2)
+    return f"{value} {_data_scale_names[exponent]}"
+
+
+class TrafficData:
     def __init__(
-        self,
-        message: str | None = None,
-        error_down: bool = False,
-        error_up: bool = False,
-        daily: bool = False,
+        self, date: datetime, traffic: list[int], error: list[bool] = None, misc=None
     ):
-        if message is None:
-            self.message = "Data error. Values are lower than actual."
-        else:
-            self.message = message
-        self.error_down = error_down
-        self.error_up = error_up
-        self.is_daily = daily
-
-    def export(self) -> dict[str, str | bool]:
-        if self.is_daily is False:
-            return {"message": self.message}
-        return {
-            "message": self.message,
-            "error_down": self.error_down,
-            "error_up": self.error_up,
+        self.date = date
+        self.traffic = {
+            "down": -1 if traffic[0] > PETABYTE else traffic[0],
+            "up": -1 if traffic[1] > PETABYTE else traffic[1],
         }
-
-
-class Props:  # pylint: disable=too-few-public-methods
-    def __init__(
-        self, date: datetime | str, down: int, up: int, comment: dict | None = None
-    ):
-        if isinstance(date, str):
-            self.date = datetime.strptime(date, DATE_FORMAT)
+        if error is None:
+            self.error = {
+                "down": self.traffic["down"] == -1,
+                "up": self.traffic["up"] == -1,
+            }
         else:
-            self.date = date
-        self.down = down
-        self.up = up
-        # Comments only exist for previous data
-        self.comment = comment
+            self.error = {"down": error[0], "up": error[1]}
+        self.misc = misc
 
+    @property
+    @abstractmethod
+    def date_str(self):
+        return
 
-class DataPoint:
-    # fmt: off
-    _data_scale = {
-        'kb': 1, 'kib': 1,
-        'mb': 2, 'mib': 2,
-        'gb': 3, 'gib': 3,
-        'tb': 4, 'tib': 4,
-        'pb': 5, 'pib': 5,
-        'eb': 6, 'eib': 6
-    }
-    _data_scale_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB')
-    # fmt: on
+    def merge(self, data):
+        self.traffic["down"] = max(self.traffic["down"], data["traffic"][0])
+        self.traffic["up"] = max(self.traffic["up"], data["traffic"][1])
 
-    def __init__(self, props: Props, daily=False):
-        self.date = props.date
-        self.down = -1 if props.down > PETABYTE else props.down
-        self.up = -1 if props.up > PETABYTE else props.up
-        self.comment = props.comment
-        if self.down == -1:
-            self._warn_bad_data(daily, True)
-        if self.up == -1:
-            self._warn_bad_data(daily, False)
+        self.error["down"] = self.error["down"] or data["error"][0]
+        self.error["up"] = self.error["up"] or data["error"][1]
+
+        if "misc" in data:
+            if self.misc is None:
+                self.misc = {}
+            for k, v in data["misc"].items():
+                self.misc[k] = v
 
     def export(self):
-        export_dict = {
-            "date": self.date.strftime(DATE_FORMAT),
-            "down": self.down,
-            "up": self.up,
+        exportable = {
+            "date": self.date_str,
+            "traffic": [self.traffic["down"], self.traffic["up"]],
+            "error": [self.error["down"], self.error["up"]],
         }
-        if self.comment is not None:
-            export_dict["comment"] = self.comment
-        return export_dict
 
-    @staticmethod
-    def format_bytes(size: int, scale: str | None = None) -> str:
-        if size < 1024:
-            return f"{size} B"
+        if self.misc is not None and len(self.misc) > 0:
+            exportable["misc"] = self.misc
 
-        if scale is not None:
-            scale = scale.lower()
-
-        if scale is None or scale not in DataPoint._data_scale:
-            exponent = int(math.floor(math.log(size, 1024)))
-        else:
-            exponent = DataPoint._data_scale[scale]
-
-        divisor = math.pow(1024, exponent)
-        value = round(size / divisor, 2)
-        return f"{value} {DataPoint._data_scale_names[exponent]}"
-
-    @property
-    def date_string(self) -> str:
-        return self.date.strftime(DATE_FORMAT)
-
-    @property
-    def total_bytes(self) -> int:
-        return self.down + self.up
-
-    def _warn_bad_data(
-        self,
-        is_daily: bool = False,
-        is_down: bool = False,
-        msg: str | None = None,
-    ):
-        """Make note of error. Only called when working on current data."""
-        if self.comment is None:
-            self.comment = Comment(message=msg, daily=is_daily)
-        else:
-            self.comment.message = msg
-
-        if is_daily:
-            if is_down:
-                self.comment.error_down = True
-            else:
-                self.comment.error_up = True
+        return exportable
 
     def __str__(self) -> str:
         return (
-            f"{self.date.strftime(DATE_FORMAT)}: "
-            + f"{DataPoint.format_bytes(self.down)}, "
-            + f"{DataPoint.format_bytes(self.up)}"
+            f"{self.date_str}: "
+            + f"{format_bytes(self.traffic['down'])}, "
+            + f"{format_bytes(self.traffic['up'])}"
         )
+
+
+class DailyTraffic(TrafficData):
+    def __init__(
+        self,
+        date: datetime | str,
+        traffic: list[int],
+        error: list[bool] = None,
+        misc=None,
+    ):
+        if isinstance(date, str):
+            date = datetime.strptime(date, DATE_FORMAT)
+        super().__init__(date, traffic, error, misc)
+
+    @property
+    def date_str(self):
+        return self.date.strftime(DATE_FORMAT)
+
+
+class MonthlyTraffic(TrafficData):
+    def __init__(
+        self,
+        date: datetime | str,
+        traffic: list[int],
+        error: list[bool] = None,
+        misc=None,
+    ):
+        if isinstance(date, str):
+            date = datetime.strptime(date, DATE_FORMAT)
+            # Month entries should always be the first day of the month
+            date = date.replace(day=1)
+        super().__init__(date, traffic, error, misc)
+
+    @property
+    def date_str(self):
+        return self.date.strftime(DATE_FORMAT)
 
 
 class StatsData:
     def __init__(self, modified: datetime) -> None:
-        self.daily: dict = {}
-        self.monthly: dict = {}
+        self.daily: dict[str, DailyTraffic] = {}
+        self.monthly: dict[str, MonthlyTraffic] = {}
         self.modified_time = modified
 
     def export(self) -> dict:
@@ -219,61 +206,36 @@ class StatsData:
     def _default_func(self, obj):
         try:
             return obj.export()
-        except Exception:
-            raise TypeError(  # pylint: disable=raise-missing-from
-                f"Unable to serialize {obj} of type {type(obj)}"
-            )
+        except Exception as e:
+            raise TypeError(f"Unable to serialize {obj} of type {type(obj)}") from e
 
     def add_daily(self, entry: tuple[datetime, int, int]):
-        new_data = DataPoint(Props(*entry), daily=True)
-        self.daily[new_data.date_string] = new_data
+        new_data = DailyTraffic(entry[0], [entry[1], entry[2]])
+        self.daily[new_data.date_str] = new_data
 
     def add_monthly(self, entry: tuple[datetime, int, int]):
-        new_data = DataPoint(Props(*entry))
-        self.monthly[new_data.date_string] = new_data
+        new_data = MonthlyTraffic(entry[0], [entry[1], entry[2]])
+        self.monthly[new_data.date_str] = new_data
 
-    def merge_history(self, previous_data):
-        # Previous data uses normal dict
-        if "daily" in previous_data:
-            for previous in previous_data["daily"]:
+    def merge_history(self, history):
+        # Previous data loaded as normal dict
+        if "daily" in history:
+            for previous in history["daily"]:
                 prev_date = previous["date"]
-                if prev_date is None:
-                    continue
                 # Use old data to fill in history and roll back errors
                 if prev_date in self.daily:
-                    self._merge_history_logic(self.daily[prev_date], previous, True)
+                    self.daily[prev_date].merge(previous)
                 else:
-                    self.daily[prev_date] = DataPoint(Props(**previous), True)
+                    self.daily[prev_date] = DailyTraffic(**previous)
 
-        if "monthly" in previous_data:
-            for previous in previous_data["monthly"]:
+        if "monthly" in history:
+            for previous in history["monthly"]:
                 prev_date = previous["date"]
-                if prev_date is None:
-                    continue
                 # Use old data to fill in history and roll back errors
                 if prev_date in self.monthly:
-                    self._merge_history_logic(self.monthly[prev_date], previous, False)
+                    self.monthly[prev_date].merge(previous)
                 else:
-                    self.monthly[prev_date] = DataPoint(Props(**previous))
-
-    def _merge_history_logic(self, curr: DataPoint, prev: dict, is_daily: bool = False):
-        # Set to highest value
-        curr.down = max(curr.down, prev["down"])
-        curr.up = max(curr.up, prev["up"])
-
-        if "comment" in prev:
-            prev_cmt = prev["comment"]
-            if curr.comment is None:
-                curr.comment = Comment(daily=is_daily)
-
-            curr.comment.message = prev_cmt["message"]
-            if "error_down" in prev_cmt and prev_cmt["error_down"] is not None:
-                curr.comment.error_down = prev_cmt["error_down"]
-                # Freeze to last known uncorrupted(?) data
-                curr.down = prev["down"]
-            if "error_up" in prev_cmt and prev_cmt["error_up"] is not None:
-                curr.comment.error_up = prev_cmt["error_up"]
-                curr.up = prev["up"]
+                    self.monthly[prev_date] = MonthlyTraffic(**previous)
 
 
 # rstats supports version ID_V1
@@ -298,10 +260,11 @@ class RStats:
                 with open(filename, "rb") as file_handle:
                     self.file_content = file_handle.read()
 
-            if len(self.file_content) != RStats.EXPECTED_SIZE:
+            filesize = len(self.file_content)
+            if filesize != RStats.EXPECTED_SIZE:
                 print(
-                    "Unsupported File Format. Require unzip file size: "
-                    + f"{RStats.EXPECTED_SIZE}."
+                    "Unsupported file format.\n"
+                    + f"Expected a size of {RStats.EXPECTED_SIZE} bytes but got: {filesize}"
                 )
                 sys.exit(2)
             print(f"Supported File Format Version: {RStats.ID_V1}")
@@ -309,7 +272,7 @@ class RStats:
             self.modified = modified
             self.data = StatsData(self.modified)
         except IOError:
-            sys.stderr.write("Can NOT read file: " + filename)
+            sys.stderr.write(f"Cannot read file: {filename}")
             traceback.print_exc()
 
     def dump(self):
@@ -317,11 +280,11 @@ class RStats:
 
         for entry_d in self._dump_stats(RStats.DAY_COUNT):
             self.data.add_daily(entry_d)
-        self._unpack_value("q", 8)
+        print(f"daily counter: {self._unpack_value('q', 8)}")
 
         for entry_m in self._dump_stats(RStats.MONTH_COUNT):
             self.data.add_monthly(entry_m)
-        self._unpack_value("q", 8)
+        print(f"monthly counter: {self._unpack_value('q', 8)}")
 
         self._completion_check()
         return self.data
@@ -391,10 +354,43 @@ class RStats:
         # datetime will have hours and minutes set to 0
 
 
+def compatibility(data):
+    if "format" in data["meta"] and data["meta"]["format"] == LOG_FORMAT_VER:
+        return data
+    try:
+        from util.update_log import data_update
+
+        return data_update(data, LOG_FORMAT_VER)
+    except ImportError as ie:
+        raise ValueError("Log format outdated! Run updater.") from ie
+
+
+def load_json_or_backup(path):
+    try:
+        with open(path, "r", encoding="utf8") as f:
+            return json.loads(f.read())
+    except json.JSONDecodeError as err:
+        sys.stderr.write(f"JSON Decode Error at position {err.pos}: {err.msg}")
+        copyfile(path, f"{path}.err")
+
+    if isfile(f"{path}.bak"):
+        try:
+            with open(f"{path}.bak", "r", encoding="utf8") as f:
+                return json.loads(f.read())
+        except json.JSONDecodeError as err:
+            sys.stderr.write(
+                f"Error reading backup data: JSON Decode Error at position {err.pos}: {err.msg}"
+            )
+    else:
+        sys.stderr.write("Unable to find backup file")
+
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("filename")
-    parser.add_argument("-o", "--out")
+    parser.add_argument("filename", help="rstats history file")
+    parser.add_argument("-o", "--out", help="output JSON file path")
 
     args = parser.parse_args()
 
@@ -405,13 +401,9 @@ def main():
         else:
             stats = RStats(args.filename, modified).dump()
             if isfile(args.out):
-                try:
-                    with open(args.out, "r", encoding="utf8") as f:
-                        prev_export = data_interop(json.loads(f.read()), LOG_FORMAT_VER)
-                    stats.merge_history(prev_export)
-                except json.JSONDecodeError as err:
-                    sys.stderr.write("JSON Decode Error: " + err.msg)
-                    copyfile(args.out, f"{args.out}.err")
+                prev_export = load_json_or_backup(args.out)
+                if prev_export is not None:
+                    stats.merge_history(compatibility(prev_export))
 
             json_data = stats.to_json()
             with open(args.out, "w", encoding="utf8") as f:

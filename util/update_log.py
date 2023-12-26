@@ -37,7 +37,7 @@ def v1_upgrade(data: dict):
     return data
 
 
-def data_interop(data: dict, current_ver: int) -> dict:
+def data_update(data: dict, current_ver: int) -> dict:
     try:
         if "format" in data["meta"]:
             data_ver = data["meta"]["format"]
@@ -70,6 +70,6 @@ if __name__ == "__main__":
         file_data = json.loads(f.read())
     with open(args.path + ".bak", "w", encoding="utf8") as f:
         f.write(json.dumps(file_data))
-    data_interop(file_data, CURRENT_VERSION)
+    data_update(file_data, CURRENT_VERSION)
     with open(args.path, "w", encoding="utf8") as f:
         f.write(json.dumps(file_data))

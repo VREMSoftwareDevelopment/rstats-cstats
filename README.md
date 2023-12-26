@@ -10,7 +10,16 @@
 ### Usage:
 `python rstats.py <filename> [--out <output-filename>]`
 
-* `--out`: Path to save/load JSON 
+* `--out`: Path to save/load JSON
+
+#### Log format update
+
+If upgrading the script to a version with a different file format, you can either:
+* Run `python update_log.py output.json` using [update_log.py](util/update_log.py)
+
+or
+
+* Put [update_log.py](util/update_log.py) in a `util` subfolder from the main script and it'll run automatically.
 
 ### Examples:
 
