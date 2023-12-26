@@ -10,6 +10,8 @@
 ### Usage:
 `python rstats.py <filename> [--out <output-filename>]`
 
+* `--out`: Path to save/load JSON 
+
 ### Examples:
 
 #### Print to console:
