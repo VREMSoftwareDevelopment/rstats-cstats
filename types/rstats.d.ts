@@ -26,7 +26,7 @@ export type RStats = {
   ]
 }
 
-export type RStatsLegacy = {
+export type RStatsLegacyV1 = {
   meta: {
     time_data: string,
     time_script: string
